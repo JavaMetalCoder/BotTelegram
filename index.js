@@ -1,4 +1,3 @@
-// index.js
 import { Telegraf } from "telegraf";
 import dotenv from "dotenv";
 import frasi from "./frasi.json" assert { type: "json" };
@@ -6,17 +5,16 @@ import libri from "./libri.json" assert { type: "json" };
 import fs from "fs";
 import cron from "node-cron";
 import fetch from "node-fetch";
-import express from "express";
-import bodyParser from "body-parser";
 
 dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Markdown Escape
+// Escape MarkdownV2
 function escapeMarkdownV2(text) {
   return text.replace(/([_\*\[\]()~`>#+=|{}.!\\-])/g, "\\$1");
 }
 
+// UTENTI
 function getUtenti() {
   try {
     return JSON.parse(fs.readFileSync("./utenti.json"));
@@ -34,6 +32,7 @@ function salvaUtente(id) {
   }
 }
 
+// ALERTS
 function getAlertList() {
   try {
     return JSON.parse(fs.readFileSync("./alert.json"));
@@ -63,7 +62,7 @@ async function fetchPrice(asset) {
   return data.c || null;
 }
 
-// Comandi
+// COMANDI
 bot.start((ctx) => {
   salvaUtente(ctx.chat.id);
   const msg = `👋 *Benvenuto su FinanzaBot!*\n\nUsa i comandi:\n/giorno\n/libri\n/ai\n/donami\n/notizie\n/prezzo BTC\n/alert BTC 60000\n/myalerts\n/removealert BTC`;
@@ -150,7 +149,7 @@ bot.command("removealert", (ctx) => {
   ctx.reply(`🗑️ Rimosso alert per *${asset}*`, { parse_mode: "MarkdownV2" });
 });
 
-// CRON
+// CRON: Frase giornaliera
 cron.schedule("0 7 * * *", async () => {
   const frase = frasi[Math.floor(Math.random() * frasi.length)];
   const msg = `💡 *Frase del giorno:*\n"${escapeMarkdownV2(frase.testo)}"\n\n🔗 ${escapeMarkdownV2(frase.link)}`;
@@ -164,6 +163,7 @@ cron.schedule("0 7 * * *", async () => {
   }
 });
 
+// CRON: Controllo alert ogni 5 minuti
 cron.schedule("*/5 * * * *", async () => {
   const alerts = getAlertList();
   const prices = {};
@@ -178,22 +178,17 @@ cron.schedule("*/5 * * * *", async () => {
   }
 });
 
-// HTTP server per Railway webhook
-const app = express();
-app.use(bodyParser.json());
-app.use(`/${process.env.BOT_TOKEN}`, (req, res) => {
-  bot.handleUpdate(req.body, res);
-});
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`✅ Webhook HTTP server attivo su porta ${process.env.PORT || 3000}`);
-});
-
-bot.launch({
-  webhook: {
-    domain: process.env.WEBHOOK_DOMAIN,
-    hookPath: `/${process.env.BOT_TOKEN}`,
-    port: process.env.PORT || 3000
-  }
-});
-
-console.log("🤖 Bot avviato via webhook con successo!");
+// AVVIO BOT (solo webhook)
+if (process.env.NODE_ENV === "production") {
+  bot.launch({
+    webhook: {
+      domain: process.env.WEBHOOK_DOMAIN,
+      hookPath: `/${process.env.BOT_TOKEN}`,
+      port: process.env.PORT || 3000
+    }
+  });
+  console.log("🤖 Bot avviato via webhook con successo!");
+} else {
+  bot.launch();
+  console.log("🤖 Bot avviato in modalità polling!");
+}
