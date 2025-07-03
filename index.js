@@ -1,199 +1,305 @@
-import { Telegraf } from "telegraf";
+// ================================
+//   FinanzaBot - index.js
+//   Assistente finanziario Telegram
+//   Powered by MetalCoder.dev {FZ}
+// ================================
+
+import { Telegraf, Markup, Scenes, session } from "telegraf";
 import dotenv from "dotenv";
-import frasi from "./frasi.json" assert { type: "json" };
-import libri from "./libri.json" assert { type: "json" };
+import express from "express";
 import fs from "fs";
 import cron from "node-cron";
 import fetch from "node-fetch";
-import express from "express";
 
+// Dati statici
+import frasi from "./frasi.json" assert { type: "json" };
+import libri from "./libri.json" assert { type: "json" };
+
+// ================================
+//   Configurazione ambiente
+// ================================
 dotenv.config();
-const bot = new Telegraf(process.env.BOT_TOKEN);
+const PORT = process.env.PORT || 3000;
+
+// ================================
+//   Setup Express (Webhook)
+// ================================
 const app = express();
-
-// Middleware per webhook
 app.use(express.json());
-app.use(`/${process.env.BOT_TOKEN}`, (req, res) => {
-  bot.handleUpdate(req.body, res);
-});
 
+// Il bot verrà definito dopo questa riga, quindi possiamo collegare il webhook
+let bot;
+
+// ================================
+//   Setup Telegraf Bot
+// ================================
+function setupBot() {
+  bot = new Telegraf(process.env.BOT_TOKEN);
+  bot.use(session());
+
+  // Webhook: riceve update da Telegram
+  app.use(`/${process.env.BOT_TOKEN}`, (req, res) => {
+    bot.handleUpdate(req.body, res);
+  });
+}
+
+// ================================
+//   Utility Functions
+// ================================
+
+/**
+ * Escapes special characters for MarkdownV2
+ */
 function escapeMarkdownV2(text) {
-  return text.replace(/([_*\[\]()~`>#+=|{}.!\\-])/g, "\\$1");
+  return text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, "\\$1");
 }
 
-function getUtenti() {
-  try { return JSON.parse(fs.readFileSync("./utenti.json")); } catch { return []; }
-}
-function salvaUtente(id) {
-  const utenti = getUtenti();
-  if (!utenti.includes(id)) {
-    utenti.push(id);
-    fs.writeFileSync("./utenti.json", JSON.stringify(utenti, null, 2));
-    console.log(`👤 Nuovo utente loggato: ${id}`);
-  }
-}
-function getAlertList() {
-  try { return JSON.parse(fs.readFileSync("./alert.json")); } catch { return []; }
-}
-function saveAlerts(alerts) {
-  fs.writeFileSync("./alert.json", JSON.stringify(alerts, null, 2));
-}
+/**
+ * Fetches price for various assets: crypto, FX, Pi coin
+ */
+async function fetchPrice(symbol) {
+  const asset = symbol.toUpperCase();
+  const cgMap = { BTC: "bitcoin", ETH: "ethereum", DOT: "polkadot" };
 
-async function fetchPrice(asset) {
-  const simbolo = asset.toUpperCase();
-  const coingeckoIds = { BTC: "bitcoin", ETH: "ethereum", DOT: "polkadot" };
-  if (coingeckoIds[simbolo]) {
-    const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${coingeckoIds[simbolo]}&vs_currencies=eur`);
+  // Crypto via CoinGecko
+  if (cgMap[asset]) {
+    const res = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${cgMap[asset]}&vs_currencies=eur`
+    );
     const data = await res.json();
-    return data[coingeckoIds[simbolo]]?.eur;
+    return data[cgMap[asset]].eur;
   }
-  if (simbolo === "USD" || simbolo === "EUR") {
+
+  // FX EUR↔USD via exchangerate.host
+  if (asset === "USD" || asset === "EUR") {
     const res = await fetch("https://api.exchangerate.host/latest?base=EUR");
-    const data = await res.json();
-    return simbolo === "USD" ? data.rates.USD : 1;
+    const fx = await res.json();
+    return asset === "USD" ? fx.rates.USD : 1;
   }
-  if (simbolo === "PI") {
+
+  // Pi Coin (API non ufficiale)
+  if (asset === "PI") {
     try {
-      const res = await fetch("https://api.xt.com/api/v4/public/market/ticker?symbol=pi_usdt");
+      const res = await fetch(
+        "https://api.xt.com/api/v4/public/market/ticker?symbol=pi_usdt"
+      );
       const json = await res.json();
-      const last = parseFloat(json.result[0]?.last);
-      return isNaN(last) ? null : last;
-    } catch { return null; }
+      return parseFloat(json.result[0].last) || null;
+    } catch {
+      return null;
+    }
   }
-  const finnhubKey = process.env.FINNHUB_API_KEY;
-  const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${simbolo}&token=${finnhubKey}`);
+
+  // Azioni/ETF via Finnhub
+  const res = await fetch(
+    `https://finnhub.io/api/v1/quote?symbol=${asset}&token=${process.env.FINNHUB_API_KEY}`
+  );
   const data = await res.json();
   return data.c || null;
 }
 
-// /start
-bot.start((ctx) => {
-  salvaUtente(ctx.chat.id);
-  ctx.reply(escapeMarkdownV2(`👋 *Benvenuto su FinanzaBot!*\n\nUsa i comandi:\n/giorno\n/libri\n/pinotizie [q]\n/notizie [q]\n/prezzo [asset]\n/cambio USD\n/alert BTC 60000\n/myalerts\n/removealert BTC\n/info`), { parse_mode: "MarkdownV2" });
-});
-
-// /giorno
-bot.command("giorno", (ctx) => {
-  const { testo, link } = frasi[Math.floor(Math.random() * frasi.length)];
-  ctx.reply(`💡 *Frase del giorno:*\n"${escapeMarkdownV2(testo)}"\n\n🔗 ${escapeMarkdownV2(link)}`, { parse_mode: "MarkdownV2" });
-});
-
-// /libri
-bot.command("libri", (ctx) => {
-  const libro = libri[Math.floor(Math.random() * libri.length)];
-  ctx.reply(`📘 *Consiglio di lettura:*\n${escapeMarkdownV2(libro)}`, { parse_mode: "MarkdownV2" });
-});
-
-// /info
-bot.command("info", (ctx) => {
-  const msg = `📊 *FinanzaBot* – Assistente finanziario su Telegram\n\n` +
-    `• /giorno – Frase motivazionale\n` +
-    `• /libri – Consiglio di lettura\n` +
-    `• /notizie [q] – News su economia, lavoro, risparmio, geo, crypto\n` +
-    `• /pinotizie – News su Pi Network\n` +
-    `• /prezzo [asset] – Prezzo di asset (BTC, ETH, PI...)\n` +
-    `• /cambio USD – Tasso EUR→USD\n` +
-    `• /alert [asset] [target] – Crea alert\n` +
-    `• /myalerts – I tuoi alert\n` +
-    `• /removealert [asset] – Rimuovi alert\n` +
-    `• /donami – Supporta il progetto 🙏\n\n` +
-    `🚀 *Premium:* /ai – Suggerimenti AI (pross.)\n` +
-    `📌 Powered by MetalCoderDev ---> t.me/MetalCoderDev`;
-  ctx.reply(escapeMarkdownV2(msg), { parse_mode: "MarkdownV2" });
-});
-
-// /ai (Premium)
-bot.command("ai", (ctx) => {
-  ctx.reply(escapeMarkdownV2(`⚠️ Funzionalità *Premium* in arrivo!\nPx support: /donami`), { parse_mode: "MarkdownV2" });
-});
-
-// /donami
-bot.command("donami", (ctx) => {
-  ctx.reply(`💸 *Supporta il progetto*\n[PayPal](https://paypal.me/zagariafabio)`, { parse_mode: "MarkdownV2" });
-});
-
-// /notizie e /pinotizie
-bot.command(["notizie","pinotizie"], async (ctx) => {
-  const args = ctx.message.text.split(' ').slice(1);
-  const query = args.join(' ') || (ctx.match === 'pinotizie' ? 'pi network' : '');
-  const url = `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&language=it` + (query ? `&q=${encodeURIComponent(query)}` : '&category=business,crypto,politics');
-  try {
-    const res = await fetch(url);
-    const json = await res.json();
-    const items = json.results.slice(0,3);
-    if (!items.length) return ctx.reply("❌ Nessuna notizia trovata.");
-    for (let art of items) {
-      await ctx.reply(`🗞️ *${escapeMarkdownV2(art.title)}*\n🔗 ${escapeMarkdownV2(art.link)}`, { parse_mode: "MarkdownV2" });
+// ================================
+//   Wizard Scene: Creazione Alert
+// ================================
+const { WizardScene, Stage } = Scenes;
+const alertWizard = new WizardScene(
+  "alert-wizard",
+  (ctx) => {
+    ctx.reply("📋 Quale asset desideri monitorare? (es: BTC)");
+    return ctx.wizard.next();
+  },
+  (ctx) => {
+    ctx.session.asset = ctx.message.text.trim().toUpperCase();
+    ctx.reply(`💬 Inserisci il livello target per ${ctx.session.asset}`);
+    return ctx.wizard.next();
+  },
+  (ctx) => {
+    const target = parseFloat(ctx.message.text.trim());
+    if (isNaN(target)) {
+      return ctx.reply("❗ Valore non valido, inserisci un numero.");
     }
-  } catch {
-    ctx.reply("❌ Errore recupero notizie.");
+    const alerts = JSON.parse(fs.readFileSync("./alert.json", "utf-8") || "[]");
+    alerts.push({ userId: ctx.chat.id, asset: ctx.session.asset, target });
+    fs.writeFileSync("./alert.json", JSON.stringify(alerts, null, 2));
+    ctx.reply(`✅ Alert creato: ${ctx.session.asset} ≥ ${target}`);
+    return ctx.scene.leave();
   }
-});
+);
+const stage = new Stage([alertWizard]);
 
-// /prezzo e /cambio
-bot.command("prezzo", async (ctx) => {
-  const asset = ctx.message.text.split(' ')[1];
-  if (!asset) return ctx.reply("📈 Usa /prezzo BTC", { parse_mode: "MarkdownV2" });
-  const price = await fetchPrice(asset);
-  if (!price) return ctx.reply("❌ Asset non trovato o non supportato.");
-  const symbolUpper = asset.toUpperCase();
-  const unit = symbolUpper === 'USD' ? 'USD' : symbolUpper === 'EUR' ? 'EUR' : symbolUpper === 'PI' ? 'USD' : '€';
-  ctx.reply(`💰 *${symbolUpper}*: *${unit}${price}*`, { parse_mode: "MarkdownV2" });
-});
+// ================================
+//   Comandi Bot
+// ================================
+function registerCommands() {
+  bot.use(stage.middleware());
 
-bot.command("cambio", async (ctx) => {
-  const cur = ctx.message.text.split(' ')[1]?.toUpperCase();
-  if (cur !== 'USD') return ctx.reply("💱 Usa /cambio USD", { parse_mode: "MarkdownV2" });
-  const rate = await fetchPrice('USD');
-  ctx.reply(`💱 1 EUR = ${rate} USD`, { parse_mode: "MarkdownV2" });
-});
+  // /start
+  bot.start((ctx) => {
+    const welcome =
+      "👋 *Benvenuto in FinanzaBot!* \nUsa /menu per esplorare le funzionalità.";
+    ctx.reply(escapeMarkdownV2(welcome), { parse_mode: "MarkdownV2" });
+  });
 
-// /alert
-bot.command("alert", async (ctx) => {
-  const [asset, target] = ctx.message.text.split(' ').slice(1);
-  if (!asset || !target || isNaN(target)) return ctx.reply("❗ Usa /alert BTC 60000");
-  const alerts = getAlertList();
-  alerts.push({ userId: ctx.chat.id, asset: asset.toUpperCase(), target: parseFloat(target) });
-  saveAlerts(alerts);
-  ctx.reply(`✅ Alert: ${asset.toUpperCase()} >= €${target}`);
-});
+  // /menu
+  bot.command("menu", (ctx) => {
+    ctx.reply(
+      "📋 *Menu Principale*",
+      {
+        parse_mode: "MarkdownV2",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback("💱 Cambio EUR→USD", "cambio_usd")],
+          [Markup.button.callback("💰 Prezzo Asset", "prezzo_asset")],
+          [Markup.button.callback("🗞️ Notizie", "news_menu")],
+          [Markup.button.callback("🔔 Crea Alert", "alert_menu")],
+          [Markup.button.callback("🪙 Pi Network", "pinotizie")]
+        ])
+      }
+    );
+  });
 
-bot.command("myalerts", (ctx) => {
-  const list = getAlertList().filter(a => a.userId===ctx.chat.id);
-  if (!list.length) return ctx.reply("🔕 Nessun alert attivo.");
-  const txt = list.map(a=>`- ${a.asset} >= €${a.target}`).join('\n');
-  ctx.reply(`🔔 I tuoi alert:\n${txt}`, { parse_mode: "MarkdownV2" });
-});
+  // Callback queries
+  bot.on("callback_query", async (ctx) => {
+    const cmd = ctx.callbackQuery.data;
+    await ctx.answerCbQuery();
+    switch (cmd) {
+      case "cambio_usd": {
+        const rate = await fetchPrice("USD");
+        return ctx.editMessageText(`💱 1 EUR = ${rate} USD`);
+      }
+      case "prezzo_asset":
+        return ctx.editMessageText("➡️ Digita /prezzo [asset], es: /prezzo BTC");
+      case "news_menu":
+        return ctx.editMessageText("➡️ Digita /notizie [argomento], es: /notizie crypto");
+      case "alert_menu":
+        return ctx.scene.enter("alert-wizard");
+      case "pinotizie":
+        return ctx.editMessageText("➡️ Eseguo /pinotizie");
+      default:
+        return;
+    }
+  });
 
-bot.command("removealert", (ctx) => {
-  const asset = ctx.message.text.split(' ')[1]?.toUpperCase();
-  if (!asset) return ctx.reply("❗ Usa /removealert BTC");
-  let alerts = getAlertList();
-  alerts = alerts.filter(a=>!(a.userId===ctx.chat.id && a.asset===asset));
-  saveAlerts(alerts);
-  ctx.reply(`🗑️ Alert rimosso: ${asset}`);
-});
+  // /notizie e /pinotizie
+  bot.command(["notizie", "pinotizie"], async (ctx) => {
+    const args = ctx.message.text.split(" ").slice(1);
+    const query = args.length
+      ? args.join(" ")
+      : ctx.match === "pinotizie"
+      ? "pi network"
+      : "";
+    const url =
+      `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}` +
+      (query
+        ? `&q=${encodeURIComponent(query)}`
+        : "&category=business,crypto,politics");
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      const items = data.results.slice(0, 3);
+      if (!items.length) return ctx.reply("❌ Nessuna notizia trovata.");
+      for (let art of items) {
+        ctx.reply(
+          `🗞️ *${escapeMarkdownV2(art.title)}* \n🔗 ${escapeMarkdownV2(art.link)}`,
+          { parse_mode: "MarkdownV2" }
+        );
+      }
+    } catch {
+      ctx.reply("❌ Errore nel recupero delle notizie.");
+    }
+  });
 
-// CRON: frase giornaliera
+  // /prezzo
+  bot.command("prezzo", async (ctx) => {
+    const asset = ctx.message.text.split(" ")[1];
+    if (!asset) return ctx.reply("❗ Usa /prezzo [asset], es: /prezzo BTC");
+    const price = await fetchPrice(asset);
+    if (!price) return ctx.reply("❌ Asset non supportato o non trovato.");
+    const unit = asset.toUpperCase() === "USD" ? "USD" : "€";
+    ctx.reply(
+      `💰 *${asset.toUpperCase()}*: *${unit}${price}*`,
+      { parse_mode: "MarkdownV2" }
+    );
+  });
+
+  // /cambio
+  bot.command("cambio", async (ctx) => {
+    const cur = ctx.message.text.split(" ")[1]?.toUpperCase();
+    if (cur !== "USD") return ctx.reply("❗ Usa /cambio USD");
+    const rate = await fetchPrice("USD");
+    ctx.reply(`💱 1 EUR = ${rate} USD`);
+  });
+
+  // /myalerts
+  bot.command("myalerts", (ctx) => {
+    const list = JSON.parse(fs.readFileSync("./alert.json", "utf-8") || "[]");
+    const mine = list.filter((a) => a.userId === ctx.chat.id);
+    if (!mine.length) return ctx.reply("🔕 Nessun alert attivo.");
+    const text = mine.map((a) => `- ${a.asset} ≥ €${a.target}`).join("\n");
+    ctx.reply(`🔔 I tuoi alert:\n${text}`, { parse_mode: "MarkdownV2" });
+  });
+
+  // /removealert
+  bot.command("removealert", (ctx) => {
+    const asset = ctx.message.text.split(" ")[1]?.toUpperCase();
+    if (!asset) return ctx.reply("❗ Usa /removealert [asset]");
+    let list = JSON.parse(fs.readFileSync("./alert.json", "utf-8") || "[]");
+    list = list.filter((a) => !(a.userId === ctx.chat.id && a.asset === asset));
+    fs.writeFileSync("./alert.json", JSON.stringify(list, null, 2));
+    ctx.reply(`🗑️ Alert rimosso: ${asset}`);
+  });
+
+  // /donami
+  bot.command("donami", (ctx) => {
+    ctx.reply(
+      "💸 *Supporta il progetto*\n\n[PayPal](https://paypal.me/zagariafabio)",
+      { parse_mode: "MarkdownV2" }
+    );
+  });
+}
+
+// ================================
+//   Cron Jobs
+// ================================
+
+// Frase del giorno alle 07:00
 cron.schedule("0 7 * * *", async () => {
-  const { testo, link } = frasi[Math.floor(Math.random()*frasi.length)];
-  for (const id of getUtenti()) {
-    try { await bot.telegram.sendMessage(id, `💡 "${escapeMarkdownV2(testo)}"\n🔗 ${escapeMarkdownV2(link)}`, { parse_mode: "MarkdownV2" }); }
-    catch {};
+  const { testo, link } = frasi[Math.floor(Math.random() * frasi.length)];
+  const ids = JSON.parse(fs.readFileSync("./utenti.json", "utf-8") || "[]");
+  for (let id of ids) {
+    await bot.telegram.sendMessage(
+      id,
+      `💡 ${escapeMarkdownV2(testo)}\n🔗 ${escapeMarkdownV2(link)}`,
+      { parse_mode: "MarkdownV2" }
+    );
   }
 });
 
-// CRON: controllo alert ogni 5 min
+// Controllo alert ogni 5 minuti
 cron.schedule("*/5 * * * *", async () => {
-  const alerts = getAlertList();
+  const list = JSON.parse(fs.readFileSync("./alert.json", "utf-8") || "[]");
   const cache = {};
-  for (const a of alerts) {
+  for (let a of list) {
     if (!cache[a.asset]) cache[a.asset] = await fetchPrice(a.asset);
-    if (cache[a.asset]>=a.target) await bot.telegram.sendMessage(a.userId, `🔔 *ALERT*: ${a.asset} >= €${cache[a.asset]}`,{ parse_mode:"MarkdownV2" });
+    if (cache[a.asset] >= a.target) {
+      await bot.telegram.sendMessage(
+        a.userId,
+        `🔔 ALERT: ${a.asset} ≥ €${cache[a.asset]}`
+      );
+    }
   }
 });
 
-// Avvia polling in dev
-if (process.env.NODE_ENV!="production") { bot.launch(); console.log("🤖 Polling attivo"); }
-// Avvia Express server
-app.listen(process.env.PORT||3000,()=>console.log("✅ Webhook HTTP attivo"));
+// ================================
+//   Avvio Bot e Server
+// ================================
+setupBot();
+registerCommands();
+
+if (process.env.NODE_ENV !== "production") {
+  bot.launch();
+  console.log("🤖 Polling attivo");
+}
+
+app.listen(PORT, () => {
+  console.log(`✅ Webhook attivo su porta ${PORT}`);
+});
