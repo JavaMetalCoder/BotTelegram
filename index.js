@@ -18,6 +18,14 @@ import frasi from './frasi.json' assert { type: 'json' };
 import libri from './libri.json' assert { type: 'json' };
 dotenv.config();
 
+process.on('unhandledRejection', err => {
+  console.error('❌ Unhandled Rejection:', err);
+});
+process.on('uncaughtException', err => {
+  console.error('❌ Uncaught Exception:', err);
+});
+
+
 const PORT = process.env.PORT || 3000;
 
 if (cluster.isPrimary) {
