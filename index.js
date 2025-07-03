@@ -15,9 +15,6 @@ import fetch from "node-fetch";
 import frasi from "./frasi.json" assert { type: "json" };
 import libri from "./libri.json" assert { type: "json" };
 
-// ================================
-//   Configurazione ambiente
-// ================================
 dotenv.config();
 const PORT = process.env.PORT || 3000;
 
@@ -32,16 +29,12 @@ app.use(express.json());
 // ================================
 const bot = new Telegraf(process.env.BOT_TOKEN);
 bot.use(session());
-
-// Colleghiamo il webhook
-app.use(`/${process.env.BOT_TOKEN}`, (req, res) => {
-  bot.handleUpdate(req.body, res);
-});
+app.use(`/${process.env.BOT_TOKEN}`, (req, res) => bot.handleUpdate(req.body, res));
 
 // ================================
 //   Utility Functions
 // ================================
-/** Escapes special MarkdownV2 chars */
+/** Escapes special characters for MarkdownV2 */
 function escapeMarkdownV2(text) {
   return text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, "\\$1");
 }
@@ -67,7 +60,7 @@ async function fetchPrice(symbol) {
     return asset === "USD" ? fx.rates.USD : 1;
   }
 
-  // Pi Coin
+  // Pi Coin (non ufficiale)
   if (asset === "PI") {
     try {
       const res = await fetch(
@@ -119,29 +112,34 @@ const stage = new Stage([alertWizard]);
 bot.use(stage.middleware());
 
 // ================================
-//   Bot Commands
+//   Bot Commands & Menu
 // ================================
 
 // /start
 bot.start((ctx) => {
   const welcome =
-    "👋 Benvenuto in FinanzaBot! \nCreato da MetalCoderDev \nt.me/MetalCoderDev \nUsa /menu per esplorare le funzionalità.";
+    "👋 *Benvenuto in FinanzaBot!* \nUsa /menu per esplorare le funzionalità.";
   ctx.reply(escapeMarkdownV2(welcome), { parse_mode: "MarkdownV2" });
 });
 
 // /menu
 bot.command("menu", (ctx) => {
   ctx.reply(
-    "📋Menu Principale: FinanzaZen",
+    "📋 *Menu Principale*",
     {
       parse_mode: "MarkdownV2",
       ...Markup.inlineKeyboard([
-        [Markup.button.callback("💱 Cambio EUR→USD", "cambio_usd")],
-        [Markup.button.callback("💰 Prezzo Asset", "prezzo_asset")],
+        [Markup.button.callback("💡 Giorno", "giorno")],
+        [Markup.button.callback("📚 Libri", "libri")],
         [Markup.button.callback("🗞️ Notizie", "news_menu")],
-        [Markup.button.callback("🪙 Pi Network", "pinotizie")],
+        [Markup.button.callback("🪙 Pi News", "pinotizie")],
+        [Markup.button.callback("💰 Prezzo Asset", "prezzo_asset")],
+        [Markup.button.callback("💱 Cambio EUR→USD", "cambio_usd")],
+        [Markup.button.callback("🔔 Crea Alert", "alert_menu")],
+        [Markup.button.callback("📊 I miei Alert", "myalerts_menu")],
+        [Markup.button.callback("🗑️ Rimuovi Alert", "removealert_menu")],
         [Markup.button.callback("ℹ️ Info", "info")],
-        [Markup.button.callback("🙏 Supporto", "support")],
+        [Markup.button.callback("🙏 Supporto", "support")]
       ]),
     }
   );
@@ -153,24 +151,28 @@ bot.on("callback_query", async (ctx) => {
   await ctx.answerCbQuery();
 
   switch (cmd) {
-    case "cambio_usd": {
-      const rate = await fetchPrice("USD");
-      return ctx.editMessageText(`💱 1 EUR = ${rate} USD`);
-    }
-    case "prezzo_asset":
-      return ctx.editMessageText("➡️ Digita /prezzo [asset], es: /prezzo BTC");
+    case "giorno":
+      return ctx.telegram.sendMessage(ctx.chat.id, "/giorno");
+    case "libri":
+      return ctx.telegram.sendMessage(ctx.chat.id, "/libri");
     case "news_menu":
-      return ctx.editMessageText(
-        "➡️ Digita /notizie [argomento], es: /notizie crypto"
-      );
+      return ctx.telegram.sendMessage(ctx.chat.id, "/notizie");
     case "pinotizie":
-      return sendPinews(ctx);
+      return ctx.telegram.sendMessage(ctx.chat.id, "/pinotizie");
+    case "prezzo_asset":
+      return ctx.telegram.sendMessage(ctx.chat.id, "/prezzo BTC");
+    case "cambio_usd":
+      return ctx.telegram.sendMessage(ctx.chat.id, "/cambio USD");
+    case "alert_menu":
+      return ctx.scene.enter("alert-wizard");
+    case "myalerts_menu":
+      return ctx.telegram.sendMessage(ctx.chat.id, "/myalerts");
+    case "removealert_menu":
+      return ctx.telegram.sendMessage(ctx.chat.id, "/removealert BTC");
     case "info":
       return sendInfo(ctx);
     case "support":
-      return ctx.editMessageText("🙏 Supporta MetalCoder.dev: /donami");
-    case "alert_menu":
-      return ctx.scene.enter("alert-wizard");
+      return ctx.telegram.sendMessage(ctx.chat.id, "/donami");
     default:
       return;
   }
@@ -190,38 +192,73 @@ function sendInfo(ctx) {
     "• /myalerts – I tuoi alert\n" +
     "• /removealert – Rimuovi alert\n" +
     "• /donami – Supporta progetto\n" +
-    "Powered by MetalCoder";
+    "Powered by MetalCoder.dev {FZ}";
   return ctx.editMessageText(escapeMarkdownV2(info), {
     parse_mode: "MarkdownV2",
   });
 }
 
 // /pinotizie helper
-async function sendPinews(ctx) {
-  const url = `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&q=pi network`;
+bot.command("pinotizie", async (ctx) => {
+  const url = `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&q=pi network&language=it,en`;
   try {
     const res = await fetch(url);
     const data = await res.json();
     const items = data.results.slice(0, 3);
     if (!items.length)
-      return ctx.editMessageText("❌ Nessuna notizia PI trovata.");
-    await ctx.editMessageText("🪙 *Notizie Pi Network:*", {
-      parse_mode: "MarkdownV2",
-    });
+      return ctx.reply("❌ Nessuna notizia Pi trovata.");
     for (let art of items) {
       await ctx.reply(
-        `🗞️ *${escapeMarkdownV2(art.title)}*\n🔗 ${escapeMarkdownV2(
-          art.link
-        )}`,
+        `🗞️ *${escapeMarkdownV2(art.title)}*\n🔗 ${escapeMarkdownV2(art.link)}`,
         { parse_mode: "MarkdownV2" }
       );
     }
   } catch {
-    ctx.editMessageText("❌ Errore recupero notizie Pi.");
+    ctx.reply("❌ Errore recupero notizie Pi.");
   }
-}
+});
 
-// /notizie e /pinotizie sono già gestiti; implementa /prezzo, /cambio, /alert, ecc.
+// /notizie
+bot.command("notizie", async (ctx) => {
+  const args = ctx.message.text.split(" ").slice(1);
+  const query = args.length ? args.join(" ") : "";
+  const url =
+    `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}` +
+    (query
+      ? `&q=${encodeURIComponent(query)}`
+      : "&category=business,crypto,politics&language=it,en");
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    const items = data.results.slice(0, 3);
+    if (!items.length) return ctx.reply("❌ Nessuna notizia trovata.");
+    for (let art of items) {
+      await ctx.reply(
+        `🗞️ *${escapeMarkdownV2(art.title)}*\n🔗 ${escapeMarkdownV2(art.link)}`,
+        { parse_mode: "MarkdownV2" }
+      );
+    }
+  } catch {
+    ctx.reply("❌ Errore nel recupero delle notizie.");
+  }
+});
+
+// /giorno
+bot.command("giorno", (ctx) => {
+  const { testo, link } = frasi[Math.floor(Math.random() * frasi.length)];
+  ctx.reply(
+    `💡 *Frase del giorno:*\n${escapeMarkdownV2(testo)}\n🔗 ${escapeMarkdownV2(link)}`,
+    { parse_mode: "MarkdownV2" }
+  );
+});
+
+// /libri
+bot.command("libri", (ctx) => {
+  const libro = libri[Math.floor(Math.random() * libri.length)];
+  ctx.reply(`📚 *Consiglio di lettura:*\n${escapeMarkdownV2(libro)}`, {
+    parse_mode: "MarkdownV2",
+  });
+});
 
 // /prezzo
 bot.command("prezzo", async (ctx) => {
@@ -257,9 +294,7 @@ bot.command("removealert", (ctx) => {
   const asset = ctx.message.text.split(" ")[1]?.toUpperCase();
   if (!asset) return ctx.reply("❗ Usa /removealert [asset]");
   let list = JSON.parse(fs.readFileSync("./alert.json", "utf-8") || "[]");
-  list = list.filter(
-    (a) => !(a.userId === ctx.chat.id && a.asset === asset)
-  );
+  list = list.filter((a) => !(a.userId === ctx.chat.id && a.asset === asset));
   fs.writeFileSync("./alert.json", JSON.stringify(list, null, 2));
   ctx.reply(`🗑️ Alert rimosso: ${asset}`);
 });
@@ -307,9 +342,5 @@ cron.schedule("*/5 * * * *", async () => {
 // ================================
 //   Avvio Bot e Server
 // ================================
-if (process.env.NODE_ENV !== "production") {
-  bot.launch();
-  console.log("🤖 Polling attivo");
-}
-
+bot.launch();
 app.listen(PORT, () => console.log(`✅ Webhook attivo su porta ${PORT}`));
