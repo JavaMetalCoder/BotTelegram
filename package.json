@@ -1,20 +1,31 @@
 {
-  "name": "bottelegram",
+  "name": "finanzazen-bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "FinanzaZen – Assistente finanziario Telegram | Powered by MetalCoderDev",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "telegram",
+    "bot",
+    "finanza",
+    "crypto",
+    "telegraf",
+    "metalcoderdev"
+  ],
+  "author": "MetalCoderDev",
+  "license": "MIT",
   "dependencies": {
     "dotenv": "^17.0.1",
     "express": "^5.1.0",
     "node-cron": "^4.2.0",
     "node-fetch": "^3.3.2",
     "telegraf": "^4.16.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
