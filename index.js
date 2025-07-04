@@ -17,59 +17,28 @@ import fetch from 'node-fetch';
 dotenv.config();
 const PORT = process.env.PORT || 3000;
 
+// Log di emergenza per promise non gestite
 process.on('unhandledRejection', err => console.error('❌ Unhandled Rejection:', err));
 process.on('uncaughtException', err => console.error('❌ Uncaught Exception:', err));
 
-if (cluster.isPrimary) {
-  const cpuCount = os.cpus().length;
-  console.log(`🔧 Master process - fork ${cpuCount} workers`);
+// ==========================================
+//  Cluster: usa max 2 worker in dev, 1 in prod
+// ==========================================
+if (process.env.NODE_ENV !== 'production' && cluster.isPrimary) {
+  const cpuCount = Math.min(os.cpus().length, 2);
+  console.log(`🔧 Dev mode – fork ${cpuCount} workers`);
   for (let i = 0; i < cpuCount; i++) cluster.fork();
   cluster.on('exit', (worker) => {
-    console.warn(`⚠️ Worker ${worker.process.pid} morto, riavvio...`);
+    console.warn(`⚠️ Worker ${worker.process.pid} è morto, ne avvio un altro`);
     cluster.fork();
   });
 } else {
+  // =============== Tutto il codice bot qui ===============
+
   let utenti = [];
   let alerts = [];
   let frasi = [];
   let libri = [];
-
-  // ============================
-  //   Utility
-  // ============================
-  function escapeMarkdownV2(text) {
-    return text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, '\\$1');
-  }
-
-  const priceCache = new Map();
-  const TTL = 60_000;
-  async function fetchPrice(symbol) {
-    const asset = symbol.toUpperCase();
-    const now = Date.now();
-    if (priceCache.has(asset) && now - priceCache.get(asset).ts < TTL)
-      return priceCache.get(asset).value;
-
-    let value = null;
-    const cg = { BTC: 'bitcoin', ETH: 'ethereum', DOT: 'polkadot' };
-
-    if (cg[asset]) {
-      const res = await fetch(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${cg[asset]}&vs_currencies=eur`
-      );
-      value = (await res.json())[cg[asset]].eur;
-    } else if (asset === 'USD' || asset === 'EUR') {
-      const fx = await (await fetch('https://api.exchangerate.host/latest?base=EUR')).json();
-      value = asset === 'USD' ? fx.rates.USD : 1;
-    } else {
-      const data = await (await fetch(
-        `https://finnhub.io/api/v1/quote?symbol=${asset}&token=${process.env.FINNHUB_API_KEY}`
-      )).json();
-      value = data.c;
-    }
-
-    priceCache.set(asset, { value, ts: now });
-    return value;
-  }
 
   async function loadStores() {
     try { utenti = JSON.parse(await fs.readFile('./utenti.json', 'utf-8')); } catch { utenti = []; }
@@ -83,18 +52,56 @@ if (cluster.isPrimary) {
     if (!utenti.includes(id)) { utenti.push(id); await saveUsers(); }
   }
 
+  function escapeMarkdownV2(text) {
+    return text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, '\\$1');
+  }
+
+  const priceCache = new Map();
+  const TTL = 60_000;
+  async function fetchPrice(symbol) {
+    const asset = symbol.toUpperCase();
+    const now = Date.now();
+    if (priceCache.has(asset) && now - priceCache.get(asset).ts < TTL) {
+      return priceCache.get(asset).value;
+    }
+    let value = null;
+    const cg = { BTC: 'bitcoin', ETH: 'ethereum', DOT: 'polkadot' };
+    try {
+      if (cg[asset]) {
+        const res = await fetch(
+          `https://api.coingecko.com/api/v3/simple/price?ids=${cg[asset]}&vs_currencies=eur`
+        );
+        value = (await res.json())[cg[asset]].eur;
+      } else if (asset === 'USD' || asset === 'EUR') {
+        const fx = await (await fetch('https://api.exchangerate.host/latest?base=EUR')).json();
+        value = asset === 'USD' ? fx.rates.USD : 1;
+      } else {
+        const data = await (await fetch(
+          `https://finnhub.io/api/v1/quote?symbol=${asset}&token=${process.env.FINNHUB_API_KEY}`
+        )).json();
+        value = data.c;
+      }
+      if (value == null) throw new Error('Prezzo non disponibile');
+      priceCache.set(asset, { value, ts: now });
+      return value;
+    } catch (err) {
+      console.error(`Errore fetchPrice(${symbol}):`, err.message);
+      return null;
+    }
+  }
+
+  // Caricamento iniziale
   await loadStores();
 
-  // ============================
-  //   App e Bot
-  // ============================
+  // Express + Telegraf
   const app = express();
   app.use(express.json());
 
   const bot = new Telegraf(process.env.BOT_TOKEN);
   bot.use(session());
-  app.use(`/${process.env.BOT_TOKEN}`, (req, res) => bot.handleUpdate(req.body, res));
+  app.post(`/${process.env.BOT_TOKEN}`, (req, res) => bot.handleUpdate(req.body, res));
 
+  // Wizard per /alert
   const { WizardScene, Stage } = Scenes;
   const alertWizard = new WizardScene(
     'alert-wizard',
@@ -109,9 +116,9 @@ if (cluster.isPrimary) {
       return ctx.scene.leave();
     }
   );
-  const stage = new Stage([alertWizard]);
-  bot.use(stage.middleware());
+  bot.use(new Stage([alertWizard]).middleware());
 
+  // Helpers
   function sendInfo(ctx) {
     const info =
       '📊 *FinanzaZen* – Assistente finanziario\n' +
@@ -134,30 +141,24 @@ if (cluster.isPrimary) {
     const url = `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&q=pi network&category=crypto&language=it,en`;
     try {
       const res = await fetch(url);
-      const json = await res.json();
-      const items = (json.results || []).filter(a => a.link.includes('medium.com/pi-network')).slice(0, 3);
-      if (!items.length) return ctx.reply('❌ Nessuna notizia Pi Network trovata.');
+      const items = ((await res.json()).results || [])
+        .filter(a => a.link.includes('medium.com/pi-network'))
+        .slice(0, 3);
+      if (!items.length) return ctx.reply('❌ Nessuna notizia Pi Network.');
       for (const art of items) {
-        await ctx.reply(
-          `🪙 *${escapeMarkdownV2(art.title)}*\n🔗 ${escapeMarkdownV2(art.link)}`,
-          { parse_mode: 'MarkdownV2' }
-        );
+        await ctx.reply(`🪙 *${escapeMarkdownV2(art.title)}*\n🔗 ${escapeMarkdownV2(art.link)}`, { parse_mode: 'MarkdownV2' });
       }
     } catch (err) {
-      console.error('Errore recupero Pi news:', err);
+      console.error('Errore sendPinews:', err);
       ctx.reply('❌ Errore nel recupero delle notizie Pi Network.');
     }
   }
 
-  // ============================
-  //   Comandi Base
-  // ============================
+  // ===== Comandi e Menu =====
   bot.start(async (ctx) => {
     await addUser(ctx.chat.id);
     const user = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
-    return ctx.reply(escapeMarkdownV2(`👋 Ciao ${user}, benvenuto in *FinanzaZen*! Usa /menu`), {
-      parse_mode: 'MarkdownV2'
-    });
+    return ctx.reply(escapeMarkdownV2(`👋 Ciao ${user}, benvenuto in *FinanzaZen*! Usa /menu`), { parse_mode: 'MarkdownV2' });
   });
 
   bot.command('menu', (ctx) => {
@@ -181,18 +182,13 @@ if (cluster.isPrimary) {
     switch (c) {
       case 'giorno': {
         const { testo, link } = frasi[Math.floor(Math.random() * frasi.length)];
-        return ctx.editMessageText(`💡 *Frase del giorno:*\n${escapeMarkdownV2(testo)}\n🔗 ${escapeMarkdownV2(link)}`, {
-          parse_mode: 'MarkdownV2'
-        });
+        return ctx.editMessageText(`💡 *Frase del giorno:*\n${escapeMarkdownV2(testo)}\n🔗 ${escapeMarkdownV2(link)}`, { parse_mode: 'MarkdownV2' });
       }
       case 'libri': {
         const l = libri[Math.floor(Math.random() * libri.length)];
-        return ctx.editMessageText(`📚 *Consiglio di lettura:*\n${escapeMarkdownV2(l)}`, {
-          parse_mode: 'MarkdownV2'
-        });
+        return ctx.editMessageText(`📚 *Consiglio di lettura:*\n${escapeMarkdownV2(l)}`, { parse_mode: 'MarkdownV2' });
       }
-      case 'pinotizie':
-        return sendPinews(ctx);
+      case 'pinotizie': return sendPinews(ctx);
       case 'price_BTC': {
         const p = await fetchPrice('BTC');
         return ctx.editMessageText(`💰 *BTC*: *€${p}*`, { parse_mode: 'MarkdownV2' });
@@ -201,44 +197,29 @@ if (cluster.isPrimary) {
         const r = await fetchPrice('USD');
         return ctx.editMessageText(`💱 1 EUR = ${r} USD`);
       }
-      case 'alert_menu':
-        return ctx.scene.enter('alert-wizard');
-      case 'info':
-        return sendInfo(ctx);
+      case 'alert_menu': return ctx.scene.enter('alert-wizard');
+      case 'info': return sendInfo(ctx);
       default: return;
     }
   });
 
-  // ============================
-  //   Cron Jobs
-  // ============================
+  // Cron Jobs
   cron.schedule('0 7 * * *', async () => {
     const { testo, link } = frasi[Math.floor(Math.random() * frasi.length)];
     await Promise.all(
       utenti.map(id =>
-        bot.telegram.sendMessage(
-          id,
-          `💡 ${escapeMarkdownV2(testo)}\n🔗 ${escapeMarkdownV2(link)}`,
-          { parse_mode: 'MarkdownV2' }
-        )
+        bot.telegram.sendMessage(id, `💡 ${escapeMarkdownV2(testo)}\n🔗 ${escapeMarkdownV2(link)}`, { parse_mode: 'MarkdownV2' })
       )
     );
   });
-
   cron.schedule('*/5 * * * *', async () => {
-    await Promise.all(
-      alerts.map(async (a) => {
-        const v = await fetchPrice(a.asset);
-        if (v >= a.target) {
-          await bot.telegram.sendMessage(a.userId, `🔔 ALERT: ${a.asset} ≥ €${v}`);
-        }
-      })
-    );
+    await Promise.all(alerts.map(async a => {
+      const v = await fetchPrice(a.asset);
+      if (v >= a.target) await bot.telegram.sendMessage(a.userId, `🔔 ALERT: ${a.asset} ≥ €${v}`);
+    }));
   });
 
-  // ============================
-  //   Avvio Bot
-  // ============================
+  // Avvio
   bot.launch();
   app.listen(PORT, () => console.log(`✅ Worker ${process.pid} attivo su porta ${PORT}`));
 }
